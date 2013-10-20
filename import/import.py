@@ -64,9 +64,11 @@ class Collector(object):
             del self.coords[osm_id]
 
         incomplete_highways = []
+        highway_coords_count = 0
         for osm_id, refs in self.highway_refs.iteritems():
             if any((ref in invalid_coords for ref in refs)) or len(refs) <= 1:
                 incomplete_highways.append(osm_id)
+            highway_coords_count += len(refs)
 
         for osm_id in incomplete_highways:
             del self.highway_refs[osm_id]
@@ -79,6 +81,7 @@ class Collector(object):
         print '- valid coords:', len(valid_coords)
         print '- unused coords:', len(unused_coords)
         print '- incomplete highways:', len(incomplete_highways)
+        print '- highway coords count:', highway_coords_count
 
         print 'After:'
         print '- coords:', len(self.coords)
@@ -180,6 +183,18 @@ class DB(object):
 
         cur.execute('''
             SELECT AddGeometryColumn('mm_highway', 'geometry', 4326, 'LINESTRING', 2);
+        ''')
+
+        # Highway coords
+
+        cur.execute('''
+            CREATE TABLE mm_highway_coord (
+                id         BIGSERIAL,
+                highway_id BIGINT,
+                coord_id   BIGINT,
+                index      INT,
+                size       INT
+            );
         ''')
 
         # Segmented highway
@@ -292,6 +307,35 @@ class DB(object):
                     osm_ids, data = flush(osm_ids, data)
             flush(osm_ids, data)
 
+        # Save highway coords
+
+        with TimeIt('Save highway coords'):
+            sql = '''
+                INSERT INTO mm_highway_coord (highway_id, coord_id, index, size)
+                VALUES %s
+            '''
+
+            def flush(data):
+                if len(data) == 0:
+                    return []
+
+                params = ['(%s, %s, %s, %s)' % values
+                          for values in data]
+                cur.execute(sql % ', '.join(params))
+
+                return []
+
+            data = []
+            for osm_id, refs in c.highway_refs.iteritems():
+                highway_id = highway_id_map[osm_id]
+                size = len(refs)
+                for index, ref in enumerate(refs):
+                    coord_id = coord_id_map[ref]
+                    data.append((highway_id, coord_id, index, size))
+
+                if len(data) > BATCH:
+                    data = flush(data)
+            flush(data)
 
         # Save segments
 
