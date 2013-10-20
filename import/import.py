@@ -26,6 +26,8 @@ class Collector(object):
     coords = {}
     highway_refs = {}
     highway_tags = {}
+    segments = []
+    segment_highway = defaultdict(list)
 
     def collect_coords(self, coords):
         for osm_id, lng, lat in coords:
@@ -129,21 +131,37 @@ class Collector(object):
         print 'Shared coords:', len(shared_coord)
         print 'Shared highways:', len(highway_points)
 
-        segments = defaultdict(list)
+        segments = []
+        segment_highway = defaultdict(list)
+        idx = 0
         for way_id, points in highway_points.iteritems():
             refs = self.highway_refs[way_id]
             last = 0
 
-            for _, index in points:
-                segment = refs[last:index+1]
+            index = 0
+            for _, pos in points:
+                segment = refs[last:pos+1]
+                last = pos
                 assert len(segment) > 1
-                segments[way_id].append(segment)
-                last = index
+
+                segments.append((way_id, index, segment))
+                index += 1
+
+                segment_highway[way_id].append(idx)
+                idx += 1
+
+
             segment = refs[last:]
             assert len(segment) > 1
-            segments[way_id].append(segment)
 
-        self.highway_segments = segments
+            segments.append((way_id, index, segment))
+            index += 1
+
+            segment_highway[way_id].append(idx)
+            idx += 1
+
+        self.segments = segments
+        self.segment_highway = segment_highway
 
 class DB(object):
     def connect(self):
@@ -215,6 +233,18 @@ class DB(object):
             SELECT AddGeometryColumn('mm_segment', 'geometry', 4326, 'LINESTRING', 2);
         ''')
 
+        # Segmented highway coords
+
+        cur.execute('''
+            CREATE TABLE mm_segment_coord (
+                id         BIGSERIAL,
+                segment_id BIGINT,
+                coord_id   BIGINT,
+                index      INT,
+                size       INT
+            );
+        ''')
+
         # TODO add index to osm_id
 
     def save(self, c):
@@ -223,7 +253,7 @@ class DB(object):
 
         coord_id_map = {}
         highway_id_map = {}
-        segment_id_rmap = {}
+        segment_id_map = {}
 
         cur = self.conn.cursor()
 
@@ -297,8 +327,8 @@ class DB(object):
                 geometry = 'LINESTRING(%s)' % ', '.join(coords)
 
                 segments = 1
-                if osm_id in c.highway_segments:
-                    segments = len(c.highway_segments[osm_id])
+                if osm_id in c.segment_highway:
+                    segments = len(c.segment_highway[osm_id])
 
                 data.append((osm_id, highway, name, oneway, geometry, segments))
                 osm_ids.append(osm_id)
@@ -355,9 +385,9 @@ class DB(object):
                 cur.execute(sql % ', '.join(params))
 
                 segment_ids = []
-                for segment_id in cur:
-                    segment_ids.append(segment_id)
-                segment_id_rmap.update(dict(zip(segment_ids, osm_ids)))
+                for row in cur:
+                    segment_ids.append(row[0])
+                segment_id_map.update(dict(zip(osm_ids, segment_ids)))
 
                 return [], []
 
@@ -369,25 +399,68 @@ class DB(object):
                 highway = tags.get('highway', None)
                 oneway = tags.get('oneway', '') == 'yes'
 
-                if osm_id in c.highway_segments:
-                    size = len(c.highway_segments[osm_id])
-                    for index, segment in enumerate(c.highway_segments[osm_id]):
+                if osm_id in c.segment_highway:
+                    size = len(c.segment_highway[osm_id])
+                    for segment_idx in c.segment_highway[osm_id]:
+                        _, index, segment = c.segments[segment_idx]
+
                         coords = ['%f %f' % c.coords[ref] for ref in segment]
                         geometry = 'LINESTRING(%s)' % ', '.join(coords)
 
                         data.append((osm_id, highway, name, oneway, geometry, index, size))
-                        osm_ids.append(osm_id)
+                        osm_ids.append((osm_id, index))
 
                 else:
                     coords = ['%f %f' % c.coords[ref] for ref in refs]
                     geometry = 'LINESTRING(%s)' % ', '.join(coords)
 
                     data.append((osm_id, highway, name, oneway, geometry, 0, 1))
-                    osm_ids.append(osm_id)
+                    osm_ids.append((osm_id, 0))
 
                 if len(data) > BATCH:
                     osm_ids, data = flush(osm_ids, data)
             flush(osm_ids, data)
+
+        # Save segment coords
+
+        with TimeIt('Save segment coords'):
+            sql = '''
+                INSERT INTO mm_segment_coord (segment_id, coord_id, index, size)
+                VALUES %s
+            '''
+
+            def flush(data):
+                if len(data) == 0:
+                    return []
+
+                params = ['(%s, %s, %s, %s)' % values
+                          for values in data]
+                cur.execute(sql % ', '.join(params))
+
+                return []
+
+            data = []
+            for osm_id, refs in c.highway_refs.iteritems():
+                if osm_id in c.segment_highway:
+                    size = len(c.segment_highway[osm_id])
+                    for segment_idx in c.segment_highway[osm_id]:
+                        _, index, segment = c.segments[segment_idx]
+                        segment_id = segment_id_map[(osm_id, index)]
+                        size = len(segment)
+                        for ref_idx, ref in enumerate(segment):
+                            coord_id = coord_id_map[ref]
+                            data.append((segment_id, coord_id, ref_idx, size))
+
+                else:
+                    segment_id = segment_id_map[(osm_id, 0)]
+                    size = len(refs)
+                    for index, ref in enumerate(refs):
+                        coord_id = coord_id_map[ref]
+                        data.append((segment_id, coord_id, index, size))
+
+                if len(data) > BATCH:
+                    data = flush(data)
+            flush(data)
 
 def main():
     c = Collector()
