@@ -204,6 +204,7 @@ class DB(object):
 
     def save(self, c):
         from psycopg2.extensions import adapt
+        BATCH = 10000
 
         coord_id_map = {}
         highway_id_map = {}
@@ -219,20 +220,31 @@ class DB(object):
                 VALUES %s
                 RETURNING id
             '''
+
+            def flush(osm_ids, data):
+                if len(data) == 0:
+                    return [], []
+
+                params = ['(%s, ST_GeomFromText(%s, 4326))' % tuple([adapt(v).getquoted() for v in values])
+                          for values in data]
+                cur.execute(sql % ', '.join(params))
+
+                coord_ids = []
+                for row in cur:
+                    coord_ids.append(row[0])
+                coord_id_map.update(dict(zip(osm_ids, coord_ids)))
+
+                return [], []
+
             data = []
             osm_ids = []
             for osm_id, coord in c.coords.iteritems():
                 data.append((osm_id, 'POINT(%f %f)' % coord))
                 osm_ids.append(osm_id)
 
-            params = ['(%s, ST_GeomFromText(%s, 4326))' % tuple([adapt(v).getquoted() for v in values])
-                      for values in data]
-            cur.execute(sql % ', '.join(params))
-
-            coord_ids = []
-            for row in cur:
-                coord_ids.append(row[0])
-            coord_id_map = dict(zip(osm_ids, coord_ids))
+                if len(data) > BATCH:
+                    osm_ids, data = flush(osm_ids, data)
+            flush(osm_ids, data)
 
         # Save highways
 
@@ -242,6 +254,22 @@ class DB(object):
                 VALUES %s
                 RETURNING id
             '''
+
+            def flush(osm_ids, data):
+                if len(data) == 0:
+                    return [], []
+
+                params = ['(%s, %s, %s, %s, ST_GeomFromText(%s, 4326), %s)' % tuple([adapt(v).getquoted() for v in values])
+                          for values in data]
+                cur.execute(sql % ', '.join(params))
+
+                highway_ids = []
+                for row in cur:
+                    highway_ids.append(row[0])
+                highway_id_map.update(dict(zip(osm_ids, highway_ids)))
+
+                return [], []
+
             data = []
             osm_ids = []
             for osm_id, refs in c.highway_refs.iteritems():
@@ -260,19 +288,10 @@ class DB(object):
                 data.append((osm_id, highway, name, oneway, geometry, segments))
                 osm_ids.append(osm_id)
 
-            params = ['(%s, %s, %s, %s, ST_GeomFromText(%s, 4326), %s)' % tuple([adapt(v).getquoted() for v in values])
-                      for values in data]
-            f = open('log', 'w')
-            for p in params:
-                f.write(repr(p))
-                f.write("\n")
-            f.close()
-            cur.execute(sql % ', '.join(params))
+                if len(data) > BATCH:
+                    osm_ids, data = flush(osm_ids, data)
+            flush(osm_ids, data)
 
-            highway_ids = []
-            for row in cur:
-                highway_ids.append(row[0])
-            highway_id_map = dict(zip(osm_ids, highway_ids))
 
         # Save segments
 
@@ -282,6 +301,22 @@ class DB(object):
                 VALUES %s
                 RETURNING id
             '''
+
+            def flush(osm_ids, data):
+                if len(data) == 0:
+                    return [], []
+
+                params = ['(%s, %s, %s, %s, ST_GeomFromText(%s, 4326), %s, %s)' % tuple([adapt(v).getquoted() for v in values])
+                          for values in data]
+                cur.execute(sql % ', '.join(params))
+
+                segment_ids = []
+                for segment_id in cur:
+                    segment_ids.append(segment_id)
+                segment_id_rmap.update(dict(zip(segment_ids, osm_ids)))
+
+                return [], []
+
             data = []
             osm_ids = []
             for osm_id, refs in c.highway_refs.iteritems():
@@ -306,14 +341,9 @@ class DB(object):
                     data.append((osm_id, highway, name, oneway, geometry, 0, 1))
                     osm_ids.append(osm_id)
 
-            params = ['(%s, %s, %s, %s, ST_GeomFromText(%s, 4326), %s, %s)' % tuple([adapt(v).getquoted() for v in values])
-                      for values in data]
-            cur.execute(sql % ', '.join(params))
-
-            segment_ids = []
-            for segment_id in cur:
-                segment_ids.append(segment_id)
-            segment_id_rmap = dict(zip(segment_ids, osm_ids))
+                if len(data) > BATCH:
+                    osm_ids, data = flush(osm_ids, data)
+            flush(osm_ids, data)
 
 def main():
     c = Collector()
