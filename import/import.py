@@ -65,7 +65,7 @@ class Collector(object):
 
         incomplete_highways = []
         for osm_id, refs in self.highway_refs.iteritems():
-            if any((ref in invalid_coords for ref in refs)):
+            if any((ref in invalid_coords for ref in refs)) or len(refs) <= 1:
                 incomplete_highways.append(osm_id)
 
         for osm_id in incomplete_highways:
@@ -132,9 +132,13 @@ class Collector(object):
             last = 0
 
             for _, index in points:
-                segments[way_id].append(refs[last:index+1])
+                segment = refs[last:index+1]
+                assert len(segment) > 1
+                segments[way_id].append(segment)
                 last = index
-            segments[way_id].append(refs[last:])
+            segment = refs[last:]
+            assert len(segment) > 1
+            segments[way_id].append(segment)
 
         self.highway_segments = segments
 
