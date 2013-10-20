@@ -219,13 +219,14 @@ class DB(object):
 
         cur.execute('''
             CREATE TABLE mm_segment (
-                id      BIGSERIAL,
-                osm_id  BIGINT,
-                highway VARCHAR(128),
-                name    VARCHAR(1024),
-                oneway  BOOLEAN,
-                index   INT,
-                size    INT
+                id         BIGSERIAL,
+                highway_id BIGINT,
+                osm_id     BIGINT,
+                highway    VARCHAR(128),
+                name       VARCHAR(1024),
+                oneway     BOOLEAN,
+                index      INT,
+                size       INT
             );
         ''')
 
@@ -371,7 +372,7 @@ class DB(object):
 
         with TimeIt('Save segments'):
             sql = '''
-                INSERT INTO mm_segment (osm_id, highway, name, oneway, geometry, index, size)
+                INSERT INTO mm_segment (osm_id, highway_id, highway, name, oneway, geometry, index, size)
                 VALUES %s
                 RETURNING id
             '''
@@ -380,7 +381,7 @@ class DB(object):
                 if len(data) == 0:
                     return [], []
 
-                params = ['(%s, %s, %s, %s, ST_GeomFromText(%s, 4326), %s, %s)' % tuple([adapt(v).getquoted() for v in values])
+                params = ['(%s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), %s, %s)' % tuple([adapt(v).getquoted() for v in values])
                           for values in data]
                 cur.execute(sql % ', '.join(params))
 
@@ -398,6 +399,7 @@ class DB(object):
                 name = tags.get('name', None)
                 highway = tags.get('highway', None)
                 oneway = tags.get('oneway', '') == 'yes'
+                highway_id = highway_id_map[osm_id]
 
                 if osm_id in c.segment_highway:
                     size = len(c.segment_highway[osm_id])
@@ -407,14 +409,14 @@ class DB(object):
                         coords = ['%f %f' % c.coords[ref] for ref in segment]
                         geometry = 'LINESTRING(%s)' % ', '.join(coords)
 
-                        data.append((osm_id, highway, name, oneway, geometry, index, size))
+                        data.append((osm_id, highway_id, highway, name, oneway, geometry, index, size))
                         osm_ids.append((osm_id, index))
 
                 else:
                     coords = ['%f %f' % c.coords[ref] for ref in refs]
                     geometry = 'LINESTRING(%s)' % ', '.join(coords)
 
-                    data.append((osm_id, highway, name, oneway, geometry, 0, 1))
+                    data.append((osm_id, highway_id, highway, name, oneway, geometry, 0, 1))
                     osm_ids.append((osm_id, 0))
 
                 if len(data) > BATCH:
