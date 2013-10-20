@@ -156,6 +156,7 @@ class DB(object):
 
         cur.execute('''
             CREATE TABLE mm_coord (
+                id     BIGSERIAL,
                 osm_id BIGINT PRIMARY KEY
             );
         ''')
@@ -168,10 +169,12 @@ class DB(object):
 
         cur.execute('''
             CREATE TABLE mm_highway (
-                osm_id BIGINT PRIMARY KEY,
-                highway VARCHAR(128),
-                name VARCHAR(1024),
-                oneway BOOLEAN
+                id       BIGSERIAL,
+                osm_id   BIGINT PRIMARY KEY,
+                highway  VARCHAR(128),
+                name     VARCHAR(1024),
+                oneway   BOOLEAN,
+                segments INT
             );
         ''')
 
@@ -183,11 +186,13 @@ class DB(object):
 
         cur.execute('''
             CREATE TABLE mm_segment (
-                id BIGSERIAL,
-                osm_id BIGINT,
+                id      BIGSERIAL,
+                osm_id  BIGINT,
                 highway VARCHAR(128),
-                name VARCHAR(1024),
-                oneway BOOLEAN
+                name    VARCHAR(1024),
+                oneway  BOOLEAN,
+                index   INT,
+                size    INT
             );
         ''')
 
@@ -198,6 +203,12 @@ class DB(object):
         # TODO add index to osm_id
 
     def save(self, c):
+        from psycopg2.extensions import adapt
+
+        coord_id_map = {}
+        highway_id_map = {}
+        segment_id_rmap = {}
+
         cur = self.conn.cursor()
 
         # Save coords
@@ -205,21 +216,34 @@ class DB(object):
         with TimeIt('Save coords'):
             sql = '''
                 INSERT INTO mm_coord (osm_id, geometry)
-                VALUES (%s, ST_GeomFromText(%s, 4326))
+                VALUES %s
+                RETURNING id
             '''
             data = []
+            osm_ids = []
             for osm_id, coord in c.coords.iteritems():
                 data.append((osm_id, 'POINT(%f %f)' % coord))
-            cur.executemany(sql, data)
+                osm_ids.append(osm_id)
+
+            params = ['(%s, ST_GeomFromText(%s, 4326))' % tuple([adapt(v).getquoted() for v in values])
+                      for values in data]
+            cur.execute(sql % ', '.join(params))
+
+            coord_ids = []
+            for row in cur:
+                coord_ids.append(row[0])
+            coord_id_map = dict(zip(osm_ids, coord_ids))
 
         # Save highways
 
         with TimeIt('Save highways'):
             sql = '''
-                INSERT INTO mm_highway (osm_id, highway, name, oneway, geometry)
-                VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 4326))
+                INSERT INTO mm_highway (osm_id, highway, name, oneway, geometry, segments)
+                VALUES %s
+                RETURNING id
             '''
             data = []
+            osm_ids = []
             for osm_id, refs in c.highway_refs.iteritems():
                 tags = c.highway_tags[osm_id]
                 name = tags.get('name', None)
@@ -229,18 +253,37 @@ class DB(object):
                 coords = ['%f %f' % c.coords[ref] for ref in refs]
                 geometry = 'LINESTRING(%s)' % ', '.join(coords)
 
-                data.append((osm_id, highway, name, oneway, geometry))
+                segments = 1
+                if osm_id in c.highway_segments:
+                    segments = len(c.highway_segments[osm_id])
 
-            cur.executemany(sql, data)
+                data.append((osm_id, highway, name, oneway, geometry, segments))
+                osm_ids.append(osm_id)
+
+            params = ['(%s, %s, %s, %s, ST_GeomFromText(%s, 4326), %s)' % tuple([adapt(v).getquoted() for v in values])
+                      for values in data]
+            f = open('log', 'w')
+            for p in params:
+                f.write(repr(p))
+                f.write("\n")
+            f.close()
+            cur.execute(sql % ', '.join(params))
+
+            highway_ids = []
+            for row in cur:
+                highway_ids.append(row[0])
+            highway_id_map = dict(zip(osm_ids, highway_ids))
 
         # Save segments
 
         with TimeIt('Save segments'):
             sql = '''
-                INSERT INTO mm_segment (osm_id, highway, name, oneway, geometry)
-                VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 4326))
+                INSERT INTO mm_segment (osm_id, highway, name, oneway, geometry, index, size)
+                VALUES %s
+                RETURNING id
             '''
             data = []
+            osm_ids = []
             for osm_id, refs in c.highway_refs.iteritems():
                 tags = c.highway_tags[osm_id]
                 name = tags.get('name', None)
@@ -248,19 +291,29 @@ class DB(object):
                 oneway = tags.get('oneway', '') == 'yes'
 
                 if osm_id in c.highway_segments:
-                    for segment in c.highway_segments[osm_id]:
+                    size = len(c.highway_segments[osm_id])
+                    for index, segment in enumerate(c.highway_segments[osm_id]):
                         coords = ['%f %f' % c.coords[ref] for ref in segment]
                         geometry = 'LINESTRING(%s)' % ', '.join(coords)
 
-                        data.append((osm_id, highway, name, oneway, geometry))
+                        data.append((osm_id, highway, name, oneway, geometry, index, size))
+                        osm_ids.append(osm_id)
 
                 else:
                     coords = ['%f %f' % c.coords[ref] for ref in refs]
                     geometry = 'LINESTRING(%s)' % ', '.join(coords)
 
-                    data.append((osm_id, highway, name, oneway, geometry))
+                    data.append((osm_id, highway, name, oneway, geometry, 0, 1))
+                    osm_ids.append(osm_id)
 
-            cur.executemany(sql, data)
+            params = ['(%s, %s, %s, %s, ST_GeomFromText(%s, 4326), %s, %s)' % tuple([adapt(v).getquoted() for v in values])
+                      for values in data]
+            cur.execute(sql % ', '.join(params))
+
+            segment_ids = []
+            for segment_id in cur:
+                segment_ids.append(segment_id)
+            segment_id_rmap = dict(zip(segment_ids, osm_ids))
 
 def main():
     c = Collector()
